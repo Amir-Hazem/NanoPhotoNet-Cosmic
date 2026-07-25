@@ -1,0 +1,174 @@
+from google.colab import drive
+drive.mount('/content/drive')
+
+# ==========================================
+# PINN Model: Cosmic Ray Intensity vs Altitude (Exponential Increase)
+# ==========================================
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ----------------- Device Setup -----------------
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+torch.manual_seed(42)
+
+# ----------------- Training Data (12 points) -----------------
+# Altitude in meters
+z_data = np.linspace(0, 4000, 12)[:, None]
+
+# Approximate realistic relationship: Intensity increases exponentially with altitude
+# N(z) = N0 * exp(kz)
+N0 = 1.0
+k_true = 3e-4
+N_data = N0 * np.exp(k_true * z_data)
+
+z_data = torch.tensor(z_data, dtype=torch.double, device=device, requires_grad=True)
+N_data = torch.tensor(N_data, dtype=torch.double, device=device)
+
+# ----------------- PINN Model Definition -----------------
+class PINN(nn.Module):
+    def __init__(self, layers=[1, 32, 32, 32, 1]):
+        super(PINN, self).__init__()
+        self.activation = nn.Tanh()
+        layer_list = []
+        for i in range(len(layers) - 1):
+            layer_list.append(nn.Linear(layers[i], layers[i+1]))
+        self.layers = nn.ModuleList(layer_list)
+
+    def forward(self, x):
+        x = x.double()
+        for i in range(len(self.layers) - 1):
+            x = self.activation(self.layers[i](x))
+        return self.layers[-1](x)
+
+# ----------------- Physical Equation -----------------
+# dN/dz - k*N = 0  => Intensity increases exponentially
+def physics_residual(model, z, k=3e-4):
+    z.requires_grad_(True)
+    N_pred = model(z)
+    dN_dz = torch.autograd.grad(
+        N_pred, z, grad_outputs=torch.ones_like(N_pred),
+        create_graph=True, retain_graph=True
+    )[0]
+    f = dN_dz - k * N_pred
+    return f
+
+# ----------------- Model Training -----------------
+def train(model, z_data, N_data, epochs_adam=4000, lr_adam=1e-3, k=3e-4):
+    optimizer = optim.Adam(model.parameters(), lr=lr_adam)
+    loss_fn = nn.MSELoss()
+    history = []
+
+    for epoch in range(epochs_adam):
+        optimizer.zero_grad()
+
+        # Predict experimental data
+        N_pred = model(z_data)
+
+        # Data loss
+        loss_data = loss_fn(N_pred, N_data)
+
+        # Physics equation loss
+        f_pred = physics_residual(model, z_data, k=k)
+        loss_phys = torch.mean(f_pred**2)
+
+        # Total loss
+        loss = loss_data + loss_phys
+
+        loss.backward()
+        optimizer.step()
+
+        history.append(loss.item())
+        if epoch % 500 == 0:
+            print(f"Epoch {epoch}: Total Loss={loss.item():.6f} | Data={loss_data.item():.6f} | Physics={loss_phys.item():.6f}")
+
+    return history
+
+# ----------------- Execute Training -----------------
+EPOCHS_ADAM = 5000
+LR_ADAM = 1e-3
+
+model = PINN().double().to(device)
+history = train(model, z_data, N_data, epochs_adam=EPOCHS_ADAM, lr_adam=LR_ADAM)
+
+# ----------------- Prediction -----------------
+z_test = torch.linspace(0, 4000, 200, device=device, dtype=torch.double).reshape(-1, 1)
+N_pred = model(z_test).detach().cpu().numpy()
+
+# ----------------- Plotting -----------------
+plt.figure(figsize=(8,5))
+plt.scatter(z_data.detach().cpu().numpy(), N_data.detach().cpu().numpy(),
+            color='r', label='Training Data')
+plt.plot(z_test.cpu().numpy(), N_pred, 'b-', label='PINN Prediction')
+plt.xlabel('Altitude (m)')
+plt.ylabel('Cosmic Ray Intensity (a.u.)')
+plt.title('PINN: Exponential Growth of Cosmic Ray Intensity with Altitude')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# ----------------- Plotting Losses -----------------
+plt.figure(figsize=(8,5))
+# Note: variables history_total, history_data, and history_phys are unchanged to maintain original code structure
+plt.plot(history_total, label='Total Loss', color='black')
+plt.plot(history_data, label='Data Loss', color='red', linestyle='--')
+plt.plot(history_phys, label='Physics Loss', color='blue', linestyle=':')
+plt.yscale('log')
+plt.xlabel('Epoch')
+plt.ylabel('Loss Value')
+plt.title('Training Losses (Total, Data, Physics)')
+plt.legend()
+plt.grid(True, which='both', linestyle='--', alpha=0.6)
+plt.show()
+
+
+import torch
+import numpy as np
+from sklearn.metrics import mean_squared_error, r2_score
+
+# ---------------------------
+# Assuming you have a pre-trained model, z_data, and N_data
+# ---------------------------
+
+# Calculate predictions
+with torch.no_grad():
+    N_pred = model(z_test).cpu().numpy()
+N_true = N0 * np.exp(k_true * z_test.cpu().numpy())
+
+# ---------------------------
+# Calculate statistical metrics
+# ---------------------------
+
+# MSE
+mse = mean_squared_error(N_true, N_pred)
+
+# RMSE
+rmse = np.sqrt(mse)
+
+# MRE (Mean Relative Error) in percentage
+mre = np.mean(np.abs((N_true - N_pred) / N_true)) * 100
+
+# R² (Coefficient of Determination)
+r2 = r2_score(N_true, N_pred)
+
+# Number of data points (Number of transactions)
+num_transactions = len(N_true)
+
+# Number of model parameters (Parameters)
+num_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+# ---------------------------
+# Print results
+# ---------------------------
+print("===== PINN Model Evaluation Metrics =====")
+print(f"MSE  : {mse:.6e}")
+print(f"RMSE : {rmse:.6e}")
+print(f"MRE  : {mre:.3f}%")
+print(f"R²   : {r2:.6f}")
+print("-----------------------------------------")
+print(f"Number of Transactions : {num_transactions}")
+print(f"Number of Parameters   : {num_parameters}")
+print("=========================================")
