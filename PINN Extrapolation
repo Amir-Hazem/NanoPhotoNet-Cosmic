@@ -1,0 +1,531 @@
+from google.colab import drive
+drive.mount('/content/drive')
+
+# ==========================================
+# PINN vs DNN Benchmark
+# Cosmic Ray Intensity Extrapolation
+# ==========================================
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ----------------------------------------
+# Device
+# ----------------------------------------
+device=torch.device(
+'cuda' if torch.cuda.is_available()
+else 'cpu'
+)
+
+torch.manual_seed(42)
+
+dtype=torch.double
+
+
+# ----------------------------------------
+# True physical model
+# ----------------------------------------
+N0=1.0
+k=3e-4
+
+zmax=8000.0
+
+
+# ----------------------------------------
+# Training data (0-4000 only)
+# ----------------------------------------
+z_train=np.linspace(
+0,
+4000,
+12
+)[:,None]
+
+N_train=N0*np.exp(
+k*z_train
+)
+
+z_data=torch.tensor(
+z_train/zmax,
+dtype=dtype,
+device=device,
+requires_grad=True
+)
+
+N_data=torch.tensor(
+N_train,
+dtype=dtype,
+device=device
+)
+
+
+# ----------------------------------------
+# Physics collocation points
+# ----------------------------------------
+z_phys=np.linspace(
+0,
+8000,
+1000
+)[:,None]
+
+z_phys=torch.tensor(
+z_phys/zmax,
+dtype=dtype,
+device=device,
+requires_grad=True
+)
+
+
+# ----------------------------------------
+# PINN Model
+# ----------------------------------------
+class PINN(nn.Module):
+
+    def __init__(self):
+
+        super().__init__()
+
+        self.net=nn.Sequential(
+
+            nn.Linear(1,64),
+            nn.Tanh(),
+
+            nn.Linear(64,64),
+            nn.Tanh(),
+
+            nn.Linear(64,64),
+            nn.Tanh(),
+
+            nn.Linear(64,1)
+        )
+
+    def forward(self,x):
+        return self.net(x)
+
+
+model=PINN().double().to(device)
+
+
+# ----------------------------------------
+# DNN Model
+# ----------------------------------------
+class DNN(nn.Module):
+
+    def __init__(self):
+
+        super().__init__()
+
+        self.net=nn.Sequential(
+
+            nn.Linear(1,64),
+            nn.Tanh(),
+
+            nn.Linear(64,64),
+            nn.Tanh(),
+
+            nn.Linear(64,64),
+            nn.Tanh(),
+
+            nn.Linear(64,1)
+        )
+
+    def forward(self,x):
+        return self.net(x)
+
+
+dnn=DNN().double().to(device)
+
+
+
+# ----------------------------------------
+# Physics residual
+# scaled equation
+# dN/dz' - k*zmax N =0
+# ----------------------------------------
+k_scaled=k*zmax
+
+def physics_residual(
+model,
+z
+):
+
+    N=model(z)
+
+    dNdz=torch.autograd.grad(
+        N,
+        z,
+        grad_outputs=torch.ones_like(N),
+        create_graph=True
+    )[0]
+
+    return dNdz-k_scaled*N
+
+
+
+# ----------------------------------------
+# Train PINN
+# ----------------------------------------
+def train_pinn(
+epochs=8000,
+lr=1e-3
+):
+
+    optimizer=optim.Adam(
+        model.parameters(),
+        lr=lr
+    )
+
+    mse=nn.MSELoss()
+
+    total_history=[]
+    data_history=[]
+    phys_history=[]
+
+    for epoch in range(
+    epochs
+    ):
+
+        optimizer.zero_grad()
+
+        pred=model(
+            z_data
+        )
+
+        loss_data=mse(
+            pred,
+            N_data
+        )
+
+        f=physics_residual(
+            model,
+            z_phys
+        )
+
+        loss_phys=torch.mean(
+            f**2
+        )
+
+
+        # boundary condition
+        z0=torch.tensor(
+        [[0.0]],
+        dtype=dtype,
+        device=device
+        )
+
+        bc_loss=(
+            model(z0)-1.0
+        )**2
+
+
+        loss=(
+            loss_data
+            +1000*loss_phys
+            +100*bc_loss
+        )
+
+        loss.backward()
+        optimizer.step()
+
+
+        total_history.append(
+        loss.item()
+        )
+
+        data_history.append(
+        loss_data.item()
+        )
+
+        phys_history.append(
+        loss_phys.item()
+        )
+
+
+        if epoch%500==0:
+
+            print(
+            f"PINN Epoch {epoch} "
+            f"Loss={loss.item():.3e}"
+            )
+
+    return (
+    total_history,
+    data_history,
+    phys_history
+    )
+
+
+# ----------------------------------------
+# Train DNN
+# ----------------------------------------
+def train_dnn(
+epochs=8000,
+lr=1e-3
+):
+
+    optimizer=optim.Adam(
+        dnn.parameters(),
+        lr=lr
+    )
+
+    mse=nn.MSELoss()
+
+    dnn_history=[]
+
+    for epoch in range(
+    epochs
+    ):
+
+        optimizer.zero_grad()
+
+        pred=dnn(
+            z_data
+        )
+
+        loss=mse(
+            pred,
+            N_data
+        )
+
+        loss.backward()
+        optimizer.step()
+
+        dnn_history.append(
+            loss.item()
+        )
+
+        if epoch%500==0:
+            print(
+            f"DNN Epoch {epoch} "
+            f"Loss={loss.item():.3e}"
+            )
+
+    return dnn_history
+
+
+
+# ----------------------------------------
+# Train both models
+# ----------------------------------------
+history_total,\
+history_data,\
+history_phys=train_pinn()
+
+dnn_history=train_dnn()
+
+
+
+# ----------------------------------------
+# Prediction over full domain
+# ----------------------------------------
+z_plot=np.linspace(
+0,
+8000,
+400
+)[:,None]
+
+z_plot_t=torch.tensor(
+z_plot/zmax,
+dtype=dtype,
+device=device
+)
+
+with torch.no_grad():
+
+    pinn_pred=model(
+        z_plot_t
+    ).cpu().numpy()
+
+    dnn_pred=dnn(
+        z_plot_t
+    ).cpu().numpy()
+
+
+true=N0*np.exp(
+k*z_plot
+)
+
+
+
+# ----------------------------------------
+# Extrapolation region
+# ----------------------------------------
+z_extra=np.linspace(
+4000,
+8000,
+200
+)[:,None]
+
+z_extra_t=torch.tensor(
+z_extra/zmax,
+dtype=dtype,
+device=device,
+requires_grad=True
+)
+
+with torch.no_grad():
+
+    pinn_extra=model(
+        z_extra_t
+    ).cpu().numpy()
+
+    dnn_extra=dnn(
+        z_extra_t
+    ).cpu().numpy()
+
+
+extra_true=N0*np.exp(
+k*z_extra
+)
+
+
+
+# ----------------------------------------
+# Errors
+# ----------------------------------------
+pinn_mse=np.mean(
+(pinn_extra-extra_true)**2
+)
+
+dnn_mse=np.mean(
+(dnn_extra-extra_true)**2
+)
+
+print("\nExtrapolation Errors")
+print("------------------")
+print("PINN MSE =",pinn_mse)
+print("DNN  MSE =",dnn_mse)
+
+
+# residual outside domain
+res_out=physics_residual(
+model,
+z_extra_t
+)
+
+print(
+"PDE residual outside =",
+torch.mean(
+res_out**2
+).item()
+)
+
+
+
+# ----------------------------------------
+# Prediction comparison
+# ----------------------------------------
+plt.figure(
+figsize=(11,6)
+)
+
+plt.scatter(
+z_train,
+N_train,
+color='red',
+s=70,
+label='Training data'
+)
+
+plt.axvline(
+4000,
+linestyle='--',
+label='Train/Test boundary'
+)
+
+plt.plot(
+z_plot,
+true,
+linewidth=3,
+label='Exact'
+)
+
+plt.plot(
+z_plot,
+pinn_pred,
+label='PINN'
+)
+
+plt.plot(
+z_plot,
+dnn_pred,
+label='DNN'
+)
+
+plt.xlabel(
+'Altitude (m)'
+)
+
+plt.ylabel(
+'Intensity'
+)
+
+plt.title(
+'PINN vs DNN Extrapolation'
+)
+
+plt.legend()
+plt.grid()
+plt.show()
+
+
+
+# ----------------------------------------
+# PINN Losses
+# ----------------------------------------
+plt.figure(
+figsize=(10,6)
+)
+
+plt.plot(
+history_total,
+label='Total'
+)
+
+plt.plot(
+history_data,
+label='Data'
+)
+
+plt.plot(
+history_phys,
+label='Physics'
+)
+
+plt.yscale('log')
+
+plt.xlabel(
+'Epoch'
+)
+
+plt.ylabel(
+'Loss'
+)
+
+plt.legend()
+plt.grid()
+plt.show()
+
+
+
+# ----------------------------------------
+# DNN Loss
+# ----------------------------------------
+plt.figure(
+figsize=(8,5)
+)
+
+plt.plot(
+dnn_history,
+label='DNN Loss'
+)
+
+plt.yscale(
+'log'
+)
+
+plt.legend()
+plt.grid()
+plt.show()
