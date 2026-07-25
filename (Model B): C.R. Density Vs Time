@@ -1,0 +1,195 @@
+from google.colab import drive
+drive.mount('/content/drive')
+
+# ============================================================
+# Research-grade PINN: Cosmic Ray Intensity vs Time
+# ============================================================
+
+import torch
+import matplotlib.pyplot as plt
+import torch.nn as nn
+import torch.optim as optim
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+torch.manual_seed(42)
+
+# ============================================================
+# Load and Prepare Data
+# ============================================================
+
+df = pd.read_excel("/content/drive/MyDrive/data(D Vs T) - Copy.xlsx")
+
+required_cols = ['Day', 'Hour', 'Intensity']
+if not all(col in df.columns for col in required_cols):
+    raise ValueError(f"⚠️ The file must contain the following columns: {required_cols}")
+
+df['hours_since_start'] = (df['Day'] - 1) * 24 + df['Hour']
+t_data = df['hours_since_start'].values.astype(np.float32).reshape(-1, 1)
+n_data = df['Intensity'].values.astype(np.float32).reshape(-1, 1)
+
+# --- Data Normalization (Z-Score) ---
+t_mean, t_std = t_data.mean(), t_data.std()
+n_mean, n_std = n_data.mean(), n_data.std()
+t_norm = (t_data - t_mean) / t_std
+n_norm = (n_data - n_mean) / n_std
+
+t_train = torch.tensor(t_norm, requires_grad=True).to(device)
+n_train = torch.tensor(n_norm).to(device)
+
+# ============================================================
+# Advanced PINN Model with Residual Connection
+# ============================================================
+
+class ResidualBlock(nn.Module):
+    def __init__(self, in_dim, hidden_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(in_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, in_dim)
+        self.act = nn.Tanh()
+
+    def forward(self, x):
+        residual = x
+        out = self.act(self.fc1(x))
+        out = self.fc2(out)
+        return residual + out
+
+class PINN_Advanced(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc_in = nn.Linear(1, 64)
+        self.res1 = ResidualBlock(64, 64)
+        self.res2 = ResidualBlock(64, 64)
+        self.fc_out = nn.Linear(64, 1)
+        # Ensure tau is always positive using softplus
+        self.tau_raw = nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, t):
+        x = torch.tanh(self.fc_in(t))
+        x = self.res1(x)
+        x = self.res2(x)
+        return self.fc_out(x)
+
+    def tau(self):
+        return torch.nn.functional.softplus(self.tau_raw) + 1e-3
+
+    def physics_loss(self, t, n_pred, Q_func):
+        dn_dt = torch.autograd.grad(
+            n_pred, t, grad_outputs=torch.ones_like(n_pred),
+            create_graph=True
+        )[0]
+        Q_t = Q_func(t)
+        residual = dn_dt + n_pred / self.tau() - Q_t
+        return torch.mean(residual**2)
+
+# ============================================================
+# Source Term Q(t): Represents daily solar activity variations
+# ============================================================
+
+def Q_func(t):
+    return 0.05 * torch.cos(2 * np.pi * t / 1.0) + 0.02  # Repeats every 24 hours (after normalization)
+
+# ============================================================
+# Model Training with Early Stopping and Dynamic Weighting
+# ============================================================
+
+model = PINN_Advanced().to(device)
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+loss_fn = nn.MSELoss()
+
+λ_data, λ_phys = 1.0, 0.1
+best_loss = 1e9
+patience, patience_counter = 500, 0
+epochs = 10000
+loss_hist = []
+
+for epoch in range(epochs):
+    optimizer.zero_grad()
+    n_pred = model(t_train)
+    data_loss = loss_fn(n_pred, n_train)
+    phys_loss = model.physics_loss(t_train, n_pred, Q_func)
+
+    # Dynamic weighting: gradually decrease data loss impact
+    λ_phys_eff = λ_phys * min(1.0, epoch / 2000)
+    loss = λ_data * data_loss + λ_phys_eff * phys_loss
+
+    loss.backward()
+    optimizer.step()
+
+    loss_hist.append([loss.item(), data_loss.item(), phys_loss.item()])
+
+    if loss.item() < best_loss:
+        best_loss = loss.item()
+        patience_counter = 0
+    else:
+        patience_counter += 1
+
+    if epoch % 500 == 0:
+        print(f"Epoch {epoch}/{epochs} | Loss={loss.item():.6f} | Data={data_loss.item():.6f} | Phys={phys_loss.item():.6f} | τ={model.tau().item():.3f}")
+
+    if patience_counter > patience:
+        print(f"🛑 Early stopping at epoch {epoch}")
+        break
+
+# ============================================================
+# Evaluation
+# ============================================================
+
+model.eval()
+with torch.no_grad():
+    n_pred = model(t_train).cpu().numpy()
+
+# Denormalization
+n_pred_real = n_pred * n_std + n_mean
+
+# Metrics
+mse = np.mean((n_pred_real - n_data)**2)
+rmse = np.sqrt(mse)
+r2 = 1 - np.sum((n_data - n_pred_real)**2) / np.sum((n_data - np.mean(n_data))**2)
+mre = np.mean(np.abs((n_data - n_pred_real) / n_data))
+
+# Number of Model Parameters
+num_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+print("\n📊 Performance:")
+print(f"MSE = {mse:.6f}")
+print(f"RMSE = {rmse:.6f}")
+print(f"R² = {r2:.6f}")
+print(f"MRE = {mre:.6f}")
+print(f"Estimated τ = {model.tau().item():.4f}")
+print(f"Number of Parameters   : {num_parameters}")
+
+# ============================================================
+# Plotting Results
+# ============================================================
+
+plt.figure(figsize=(10,4))
+plt.plot([x[0] for x in loss_hist], label='Total')
+plt.plot([x[1] for x in loss_hist], label='Data')
+plt.plot([x[2] for x in loss_hist], label='Physics')
+plt.legend()
+plt.yscale('log')
+plt.title("Loss evolution")
+plt.grid(alpha=0.4)
+plt.show()
+
+plt.figure(figsize=(10,6))
+plt.scatter(t_data, n_data, color='blue', label='Experimental')
+plt.plot(t_data, n_pred_real, color='red', label='PINN Prediction', linewidth=2)
+plt.axvline(24, color='gray', linestyle='--', alpha=0.5)
+plt.axvline(48, color='gray', linestyle='--', alpha=0.5)
+plt.text(10, max(n_data)*1.02, "Day 1")
+plt.text(34, max(n_data)*1.02, "Day 2")
+plt.text(58, max(n_data)*1.02, "Day 3")
+plt.legend()
+plt.xlabel("Time (hours since start)")
+plt.ylabel("Cosmic Ray Intensity")
+plt.title("Cosmic Ray Intensity Prediction Vs Time using PINN")
+plt.grid(alpha=0.4)
+plt.show()
+
+print("Number of data points:", t_train.shape[0])
+
+# ============================================================
