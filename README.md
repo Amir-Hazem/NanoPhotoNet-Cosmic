@@ -22,8 +22,10 @@ Model (B):
 
 
 ## Authors
-〖 Amir H.M.Labeb,〗^a 〖 Omar A.M.Abdelraouf,〗^(b,*)
+〖 Amir H.M.Labeb,〗^a 〖 Omar A.M.Abdelraouf,〗^(b,c,*)
 
  ^a  Department of Physics, Faculty of Science, Qena University (formerly South Valley University), Qena, 83523, Egypt.
- ^b Institute of Materials Research and Engineering, Agency for Science, Technology, and Research (A*STAR), 2       Fusionopolis Way, #08-03, Innovis, Singapore 138634, Singapore. 
-* Corresponding author. Email address: Omar_Abdelrahman@imre.a-star.edu.sg 
+ ^b  Engineering Physics and Mathematics Department, Faculty of Engineering, Ain Shams University, Cairo 11535, Egypt.
+ ^c  Institute of Materials Research and Engineering, Agency for Science, Technology, and Research (A*STAR), 2 Fusionopolis Way, #08-03, Innovis, Singapore 138634, Singapore. 
+* Corresponding author. Email address: omar.abdelraouf@eng.asu.edu.eg
+
